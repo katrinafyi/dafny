@@ -34,7 +34,7 @@ ensures meet(l1,l2) == meet(l2,l1)
 
 datatype Frame<T> = Frame(x: T, z: T, secret: T)
 datatype Val<L, T> = V(v: T, gamma: L)
-type Vars = Frame<Val<L, int>> // mapping of variable to their values.
+// type Vars = Frame<Val<L, int>> // mapping of variable to their values.
 
 function method lift<T>(v1: Val<L,T>, v2: Val<L,T>, f: (T,T) --> T): Val<L,T>
     requires f.requires(v1.v, v2.v)
@@ -52,65 +52,48 @@ function method pure<T>(t: T): Val<L,T>
 
 
 type V = Val<L,int>
+type Vars = Frame<V>
+datatype Idx = X | Z | SECRET
 class SeqLock {
-    var Vars: seq<V>
-
-    const x: int := 0;
-    const z: int := 1;
-    const secret: int := 2;
-    const NUM_VARS := 3;
+    var Vars: Vars;
+    const one := 1;
 
     constructor()
-        ensures Valid()
         ensures Secure()
     {
-        Vars := [V(0,Low), V(0,Low), V(10,High)];
+        Vars := Frame(V(0,Low), V(0,Low), V(10,High));
     }
 
-    function method LevelsWith(vars: seq<V>): seq<L>
-        requires |vars| == NUM_VARS
-        ensures |LevelsWith(vars)| == NUM_VARS
-    {
-        // x z secret
-        [if vars[z].v % 2 == 0 then Low else High, Low, High]
-    }
-
-    function method Levels(): seq<L>
-        reads this
-        requires |Vars| == NUM_VARS
-    {
-        LevelsWith(Vars)
-    }
-
-    predicate method Valid()
+    function method Levels(vars: Vars := Vars): Frame<L>
         reads this
     {
-        |Vars| == NUM_VARS
-        // && Vars[secret].gamma == High
+        Frame(if vars.z.v % 2 == 0 then Low else High, Low, High)
     }
 
-    predicate method Secure(vars: seq<V> := Vars)
+    predicate method Secure(vars: Vars := Vars)
         reads this
     {
-        Valid()
-        &&
-        |vars| == NUM_VARS
-        &&
-        var levels := LevelsWith(vars);
-        forall i | 0 <= i < |Vars| :: leq(Vars[i].gamma, levels[i])
+        var levels := Levels(vars);
+        leq(vars.x.gamma, levels.x)
+        && leq(vars.z.gamma, levels.z)
+        && leq(vars.secret.gamma, levels.secret)
     }
 
-    method Store(index: int, v: V)
+    function method Read(index: Idx): V
+        reads this
+    {
+        match index case X => Vars.x case Z => Vars.z case SECRET => Vars.secret
+    }
+
+    method Store(index: Idx, v: V)
         modifies this
-        requires Valid()
-        requires 0 <= index < |Vars|
-        requires leq(v.gamma, Levels()[index])
+        requires leq(v.gamma, match index case X => Levels().x case Z => Levels().z case SECRET => Levels().secret)
 
-        ensures Vars == old(Vars)[index := v]
+        ensures Vars == match index case X => old(Vars).(x := v) case Z => old(Vars).(z := v) case SECRET => old(Vars).(secret := v)
         // note: does not perform "secure update" check on controlled variables.
         // Secure() should be asserted after invoking this method.
     {
-        Vars := Vars[index := v];
+        Vars := match index case X => (Vars).(x := v) case Z => (Vars).(z := v) case SECRET => (Vars).(secret := v);
     }
 
     static function method add(x: int, y: int): int
@@ -123,11 +106,12 @@ class SeqLock {
         requires Secure()
 
     {
+        Store(SECRET, V(1, Low));
 
-        var e := lift(Vars[secret], pure(10), add);
+        // var e := lift(Vars.secret, pure(10), add);
         // assert leq(e.gamma, Levels()[x]);
 
-        Vars := Vars[x := e];
+        // Vars := Vars.x := e;
         // Vars, Gammas := Vars.(x := e), Gammas.(x := Gamma_e);
         // assert Secure();
     }
@@ -135,14 +119,16 @@ class SeqLock {
     method sync_write()
         modifies this
         requires Secure()
-        requires Vars[z].v % 2 == 0
+        requires Vars.z.v % 2 == 0
 
         ensures Secure()
     {
         // sync_write_R();
+        Rely(public_read_G);
 
-        var z' := lift(Vars[z], pure(1), add);
-        Store(z, z');
+        label 1: var z' := lift(Read(Z), pure(1), add);
+        Store(Z, z');
+        assert Guar@1(sync_write_G);
         assert Secure();
 
         Rely(public_read_G);
@@ -151,41 +137,53 @@ class SeqLock {
         // modify this;
         // assume Valid() && public_read_G(Vars@l);
 
-        var x' := Vars[secret];
-        Store(x, x');
+        label 2: var x' := Vars.secret;
+        Store(X, x');
+        assert Guar@2(sync_write_G);
         assert Secure();
 
-        // sync_write_R();
+        Rely(public_read_G);
 
-        var x'' := pure(0);
-        Store(x, x'');
-
-        assert Vars[x].gamma == Low;
-        // sync_write_R();
-        assert Vars[x].gamma == Low;
-
-        var z'' := lift(Vars[z], pure(1), add);
-        Store(z, z'');
+        label 3: var x'' := pure(0);
+        Store(X, x'');
+        assert Guar@3(sync_write_G);
         assert Secure();
 
-        // sync_write_R();
+        Rely(public_read_G);
+
+        label 4: var z'' := lift(Vars.z, pure(1), add);
+        Store(Z, z'');
+        assert Guar@4(sync_write_G);
+        assert Secure();
+
+        Rely(public_read_G);
     }
 
-    method Rely(rely: (seq<V>) ~> bool)
+    method Rely(rely: (Vars) ~> bool)
         modifies this
-        requires Valid()
-        ensures Valid()
         requires rely.requires(Vars)
-        ensures rely.requires(old(Vars)) && rely(old(Vars))
+        ensures rely.requires(old(Vars))
+        ensures rely(old(Vars))
 
-    predicate method public_read_G(old_vars: seq<V>)
+    twostate predicate Guar(guar: (Vars) ~> bool)
+        reads this, guar.reads
+        requires guar.requires(old(Vars))
+    {
+        guar(old(Vars))
+    }
+
+    predicate method public_read_G(old_vars: Vars)
         reads this
-        requires |old_vars| == NUM_VARS
-        requires Valid()
     {
         // true
-        leq(Vars[x].gamma, (old_vars[x].gamma))
-        && Vars[z] == old_vars[z]
+        leq(Vars.x.gamma, (old_vars.x.gamma))
+        && Vars.z == old_vars.z
+    }
+
+    predicate method sync_write_G(Old: Vars)
+        reads this
+    {
+        Vars.z.v >= Old.z.v
     }
 
     method public_write(data: V)
@@ -194,7 +192,7 @@ class SeqLock {
         requires data.gamma == Low
         ensures Secure()
     {
-        Store(x, data);
+        Store(X, data);
         assert Secure();
     }
 
@@ -206,31 +204,31 @@ class SeqLock {
     {
         var r1: V;
         {
-            r1 := Vars[z];
+            r1 := Vars.z;
             while (r1.v % 2 != 0)
                 decreases *
-                invariant r1 == Vars[z];
+                invariant r1 == Vars.z;
                 invariant Secure();
             {
-                r1 := Vars[z];
+                r1 := Vars.z;
             }
-            r2 := Vars[x];
+            r2 := Vars.x;
         }
-        while (Vars[z].v != r1.v)
+        while (Vars.z.v != r1.v)
             decreases *
-            invariant r1 == Vars[z];
-            invariant r2 == Vars[x];
+            invariant r1 == Vars.z;
+            invariant r2 == Vars.x;
             invariant Secure();
         {
-            r1 := Vars[z];
+            r1 := Vars.z;
             while (r1.v % 2 != 0)
                 decreases *
-                invariant r1 == Vars[z];
+                invariant r1 == Vars.z;
                 invariant Secure();
             {
-                r1 := Vars[z];
+                r1 := Vars.z;
             }
-            r2 := Vars[x];
+            r2 := Vars.x;
         }
     }
 
