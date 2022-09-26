@@ -89,12 +89,14 @@ class SeqLock {
         // && Vars[secret].gamma == High
     }
 
-    predicate method Secure()
+    predicate method Secure(vars: seq<V> := Vars)
         reads this
     {
         Valid()
         &&
-        var levels := Levels();
+        |vars| == NUM_VARS
+        &&
+        var levels := LevelsWith(vars);
         forall i | 0 <= i < |Vars| :: leq(Vars[i].gamma, levels[i])
     }
 
@@ -137,46 +139,53 @@ class SeqLock {
 
         ensures Secure()
     {
-        sync_write_R();
+        // sync_write_R();
 
         var z' := lift(Vars[z], pure(1), add);
         Store(z, z');
         assert Secure();
 
-        sync_write_R();
+        Rely(public_read_G);
+        // sync_write_R();
+        // label l:
+        // modify this;
+        // assume Valid() && public_read_G(Vars@l);
 
         var x' := Vars[secret];
         Store(x, x');
         assert Secure();
 
-        sync_write_R();
+        // sync_write_R();
 
         var x'' := pure(0);
         Store(x, x'');
-        assert Secure();
 
-        sync_write_R();
+        assert Vars[x].gamma == Low;
+        // sync_write_R();
+        assert Vars[x].gamma == Low;
 
         var z'' := lift(Vars[z], pure(1), add);
         Store(z, z'');
         assert Secure();
 
-        sync_write_R();
+        // sync_write_R();
     }
 
-    method sync_write_R()
+    method Rely(rely: (seq<V>) ~> bool)
         modifies this
         requires Valid()
         ensures Valid()
-        ensures public_read_G()
+        requires rely.requires(Vars)
+        ensures rely.requires(old(Vars)) && rely(old(Vars))
 
-    twostate predicate public_read_G()
+    predicate method public_read_G(old_vars: seq<V>)
         reads this
-        requires old(Valid())
+        requires |old_vars| == NUM_VARS
         requires Valid()
     {
-        leq(old(Vars[x].gamma), Vars[x].gamma)
-        && Vars[z] == old(Vars[z])
+        // true
+        leq(Vars[x].gamma, (old_vars[x].gamma))
+        && Vars[z] == old_vars[z]
     }
 
     method public_write(data: V)
@@ -201,6 +210,7 @@ class SeqLock {
             while (r1.v % 2 != 0)
                 decreases *
                 invariant r1 == Vars[z];
+                invariant Secure();
             {
                 r1 := Vars[z];
             }
@@ -210,11 +220,13 @@ class SeqLock {
             decreases *
             invariant r1 == Vars[z];
             invariant r2 == Vars[x];
+            invariant Secure();
         {
             r1 := Vars[z];
             while (r1.v % 2 != 0)
                 decreases *
                 invariant r1 == Vars[z];
+                invariant Secure();
             {
                 r1 := Vars[z];
             }
